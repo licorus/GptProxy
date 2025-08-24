@@ -131,6 +131,23 @@ class MainActivity : AppCompatActivity() {
 
         // Регистрируем приём SMS
         registerReceiver(smsReceiver, IntentFilter("android.provider.Telephony.SMS_RECEIVED"))
+
+        val smsSender = intent.getStringExtra("sms_sender")
+        val smsMessage = intent.getStringExtra("sms_message")
+
+        if (smsSender != null && smsMessage != null) {
+            currentSender = smsSender
+            appendLog("📩 Получено SMS от $currentSender: $smsMessage")
+
+            sendToAI(smsMessage) { response ->
+                runOnUiThread {
+                    appendLog("🤖 Ответ от AI: $response")
+                    sendSms(currentSender!!, response)
+                    appendLog("📤 Ответ отправлен по SMS на $currentSender")
+                }
+            }
+        }
+
     }
 
     // --- Приём SMS ---
