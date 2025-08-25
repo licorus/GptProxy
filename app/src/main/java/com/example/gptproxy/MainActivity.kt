@@ -3,10 +3,7 @@ package com.example.gptproxy
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.content.*
 import android.os.Bundle
 import android.telephony.SmsMessage
 import android.telephony.SmsManager
@@ -28,6 +25,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSend: Button
     private lateinit var btnSelectModel: Button
     private lateinit var btnSetTokens: Button
+    private lateinit var whitelistListView: ListView
+    private lateinit var btnAddWhitelist: Button
+    private lateinit var adapter: ArrayAdapter<String>
 
     private val availableModels = listOf(
         "mistralai/Mistral-Large-Instruct-2411",
@@ -38,30 +38,29 @@ class MainActivity : AppCompatActivity() {
         "meta-llama/Llama-3.3-70B-Instruct"
     )
 
-    private var maxTokens: Int = 200 // значение по умолчанию
-
-    // Текущая выбранная модель
-    private var currentModel = "openai/gpt-oss-120b"
-
-    // Текущий отправитель SMS (чтобы логировать)
+    private var maxTokens: Int = 200
+    private var currentModel = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
     private var currentSender: String? = null
 
-    // API Key (замени на свой)
+    // --- Белый список ---
+    private val PREFS_NAME = "whitelist_prefs"
+    private val KEY_WHITELIST = "whitelist"
+    private var whitelist = mutableSetOf<String>()
+
     private val apiKey = "io-v2-eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJvd25lciI6Ijg4YWI3Mzg2LTdmZDAtNDhmYy1iYjNlLTU3ZjlhNmNlZDI0MiIsImV4cCI6NDkwOTUzNTY0M30.XyxRgO0dL0OcnL3Vz-XnTMXCXNLduVRrk8txgc0qlFsXZy5TlummTd4NDSS_ehen6zwI1lEhUELqhezEEqlq3g"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS) // увеличить таймаут
-        .connectionPool(ConnectionPool(0, 1, TimeUnit.NANOSECONDS)) // чтобы не висло на повторных вызовах
+        .readTimeout(60, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(0, 1, TimeUnit.NANOSECONDS))
         .build()
 
-    //@SuppressLint("SetJavaScriptEnabled")
     @SuppressLint("SetTextI18n")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // UI
+        // --- UI ---
         scrollView = ScrollView(this)
         val layout = LinearLayout(this)
         layout.orientation = LinearLayout.VERTICAL
@@ -72,24 +71,36 @@ class MainActivity : AppCompatActivity() {
         inputField = EditText(this)
         inputField.hint = "Введите сообщение"
 
-        btnSend = Button(this)
-        btnSend.text = "Отправить в нейросеть"
+        btnSend = Button(this).apply { text = "Отправить в нейросеть" }
+        btnSelectModel = Button(this).apply { text = "Выбрать модель" }
+        btnSetTokens = Button(this).apply { text = "Задать max_tokens (сейчас $maxTokens)" }
 
-        btnSelectModel = Button(this)
-        btnSelectModel.text = "Выбрать модель"
+        val whitelistLabel = TextView(this)
+        whitelistLabel.text = "Белый список номеров:"
+        whitelistLabel.textSize = 16f
 
-        btnSetTokens = Button(this)
-        btnSetTokens.text = "Задать max_tokens (сейчас $maxTokens)"
+        whitelistListView = ListView(this)
+
+        // --- загружаем белый список ---
+        whitelist = loadWhitelist().toMutableSet()
+        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, ArrayList(whitelist))
+        whitelistListView.adapter = adapter
+
+        btnAddWhitelist = Button(this).apply { text = "Добавить номер" }
 
         layout.addView(inputField)
         layout.addView(btnSend)
         layout.addView(btnSelectModel)
         layout.addView(btnSetTokens)
+        layout.addView(whitelistLabel)
+        layout.addView(whitelistListView)
+        layout.addView(btnAddWhitelist)
         layout.addView(logView)
 
         scrollView.addView(layout)
         setContentView(scrollView)
 
+        // --- Разрешения ---
         ActivityCompat.requestPermissions(
             this,
             arrayOf(
@@ -100,36 +111,61 @@ class MainActivity : AppCompatActivity() {
             1
         )
 
-        appendLog("ℹ\uFE0F Приложение запущено. Текущая модель: $currentModel, max_tokens=$maxTokens")
+        appendLog("ℹ️ Приложение запущено. Модель: $currentModel, max_tokens=$maxTokens")
+        appendLog("✅ Белый список номеров: $whitelist")
 
-        // Кнопка отправки
+        // --- Добавление номера вручную ---
+        btnAddWhitelist.setOnClickListener {
+            val input = EditText(this)
+            input.hint = "+79991234567"
+
+            val builder = AlertDialog.Builder(this)
+            builder.setTitle("Добавить номер")
+            builder.setView(input)
+            builder.setPositiveButton("OK") { _, _ ->
+                val number = input.text.toString().trim()
+                if (number.isNotEmpty()) {
+                    whitelist.add(number)
+                    saveWhitelist(whitelist)
+                    updateWhitelistUI()
+                    appendLog("✅ Номер $number добавлен в белый список")
+                }
+            }
+            builder.setNegativeButton("Отмена", null)
+            builder.show()
+        }
+
+        // --- Удаление номера (долгий тап) ---
+        whitelistListView.setOnItemLongClickListener { _, _, position, _ ->
+            val number = adapter.getItem(position) ?: return@setOnItemLongClickListener true
+            whitelist.remove(number)
+            saveWhitelist(whitelist)
+            updateWhitelistUI()
+            appendLog("❌ Номер $number удалён из белого списка")
+            true
+        }
+
+        // --- Кнопка "Отправить" ---
         btnSend.setOnClickListener {
             val text = inputField.text.toString().trim()
             if (text.isNotEmpty()) {
-                appendLog("ℹ\uFE0F Отправка текста: $text")
+                appendLog("ℹ️ Отправка текста: $text")
                 sendToAI(text) { response ->
                     runOnUiThread {
-                        appendLog("\uD83E\uDD16 Ответ от AI: $response")
+                        appendLog("🤖 Ответ от AI: $response")
                         currentSender?.let { sender ->
                             sendSms(sender, response)
-                            appendLog("\uD83D\uDCE8 Отправлен ответ по SMS на $sender")
+                            appendLog("📤 Ответ по SMS отправлен на $sender")
                         }
                     }
                 }
             }
         }
 
-        // Кнопка выбора модели
-        btnSelectModel.setOnClickListener {
-            showModelSelectionDialog()
-        }
+        btnSelectModel.setOnClickListener { showModelSelectionDialog() }
+        btnSetTokens.setOnClickListener { showTokenInputDialog() }
 
-        // Кнопка смены max_tokens вручную
-        btnSetTokens.setOnClickListener {
-            showTokenInputDialog()
-        }
-
-        // Регистрируем приём SMS
+        // --- Приём SMS ---
         registerReceiver(smsReceiver, IntentFilter("android.provider.Telephony.SMS_RECEIVED"))
 
         val smsSender = intent.getStringExtra("sms_sender")
@@ -137,77 +173,107 @@ class MainActivity : AppCompatActivity() {
 
         if (smsSender != null && smsMessage != null) {
             currentSender = smsSender
-            appendLog("📩 Получено SMS от $currentSender: $smsMessage")
-
-            sendToAI(smsMessage) { response ->
-                runOnUiThread {
-                    appendLog("🤖 Ответ от AI: $response")
-                    sendSms(currentSender!!, response)
-                    appendLog("📤 Ответ отправлен по SMS на $currentSender")
-                }
-            }
+            handleIncomingSms(smsSender, smsMessage)
         }
-
     }
 
     // --- Приём SMS ---
     private val smsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            val bundle = intent?.extras
-            if (bundle != null) {
-                val pdus = bundle["pdus"] as Array<*>
-                for (pdu in pdus) {
-                    val sms = SmsMessage.createFromPdu(pdu as ByteArray)
-                    currentSender = sms.originatingAddress
-                    val messageBody = sms.messageBody
-                    appendLog("📩 Получено SMS от $currentSender: $messageBody")
-
-                    // --- Команда смены модели ---
-                    if (messageBody.startsWith("СМЕНИТЬ")) {
-                        val parts = messageBody.split(" ")
-                        if (parts.size == 2) {
-                            val index = parts[1].toIntOrNull()
-                            if (index != null && index in availableModels.indices) {
-                                currentModel = availableModels[index]
-                                appendLog("ℹ️ Модель изменена на: $currentModel")
-                            } else {
-                                appendLog("❗️ Ошибка: неправильный номер модели")
-                            }
-                        }
-                        return
-                    }
-
-                    // --- Команда смены max_tokens ---
-                    if (messageBody.startsWith("MAX_TOKENS")) {
-                        val parts = messageBody.split(" ")
-                        if (parts.size == 2) {
-                            val value = parts[1].toIntOrNull()
-                            if (value != null && value > 0) {
-                                maxTokens = value
-                                appendLog("ℹ️ max_tokens изменён на $maxTokens")
-                                runOnUiThread {
-                                    btnSetTokens.text = "Задать max_tokens (сейчас $maxTokens)"
-                                }
-                            } else {
-                                appendLog("❗️ Ошибка: некорректное значение max_tokens")
-                            }
-                        }
-                        return
-                    }
-
-                    // --- Если это обычный вопрос ---
-                    sendToAI(messageBody) { response ->
-                        runOnUiThread {
-                            appendLog("🤖 Ответ на SMS от $currentSender:\n$response")
-                            currentSender?.let { sender ->
-                                sendSms(sender, response)
-                                appendLog("📤 Отправлен ответ по SMS на $sender")
-                            }
-                        }
-                    }
-                }
+            val bundle = intent?.extras ?: return
+            val pdus = bundle["pdus"] as? Array<*> ?: return
+            for (pdu in pdus) {
+                val sms = SmsMessage.createFromPdu(pdu as ByteArray)
+                val sender = sms.originatingAddress ?: return
+                val messageBody = sms.messageBody
+                handleIncomingSms(sender, messageBody)
             }
         }
+    }
+
+    // --- Обработка SMS ---
+    private fun handleIncomingSms(sender: String, messageBody: String) {
+        appendLog("📩 Получено SMS от $sender: $messageBody")
+
+        // --- Управление белым списком через SMS ---
+        if (messageBody.uppercase().startsWith("WHITELIST")) {
+            val parts = messageBody.split(" ")
+            when {
+                parts.size == 3 && parts[1].equals("ADD", true) -> {
+                    val number = parts[2].trim()
+                    whitelist.add(number)
+                    saveWhitelist(whitelist)
+                    updateWhitelistUI()
+                    appendLog("✅ Через SMS: добавлен номер $number")
+                    sendSms(sender, "✅ Номер $number добавлен в белый список")
+                }
+                parts.size == 3 && parts[1].equals("REMOVE", true) -> {
+                    val number = parts[2].trim()
+                    if (whitelist.remove(number)) {
+                        saveWhitelist(whitelist)
+                        updateWhitelistUI()
+                        appendLog("❌ Через SMS: удалён номер $number")
+                        sendSms(sender, "❌ Номер $number удалён из белого списка")
+                    } else {
+                        sendSms(sender, "⚠️ Номер $number не найден в белом списке")
+                    }
+                }
+                parts.size == 2 && parts[1].equals("LIST", true) -> {
+                    val list = whitelist.joinToString(", ").ifEmpty { "Белый список пуст" }
+                    sendSms(sender, "📋 Белый список: $list")
+                }
+            }
+            return
+        }
+
+        // --- Игнорируем чужие SMS ---
+        if (!whitelist.contains(sender)) {
+            appendLog("🚫 Игнорируем SMS от $sender (не в белом списке)")
+            return
+        }
+
+        // --- Служебные команды ---
+        if (messageBody.startsWith("СМЕНИТЬ")) {
+            val parts = messageBody.split(" ")
+            if (parts.size == 2) {
+                val index = parts[1].toIntOrNull()
+                if (index != null && index in availableModels.indices) {
+                    currentModel = availableModels[index]
+                    appendLog("ℹ️ Модель изменена на: $currentModel")
+                } else appendLog("❗️ Ошибка: неправильный номер модели")
+            }
+            return
+        }
+
+        if (messageBody.startsWith("MAX_TOKENS")) {
+            val parts = messageBody.split(" ")
+            if (parts.size == 2) {
+                val value = parts[1].toIntOrNull()
+                if (value != null && value > 0) {
+                    maxTokens = value
+                    appendLog("ℹ️ max_tokens изменён на $maxTokens")
+                    runOnUiThread { btnSetTokens.text = "Задать max_tokens (сейчас $maxTokens)" }
+                } else appendLog("❗️ Ошибка: некорректное значение max_tokens")
+            }
+            return
+        }
+
+        // --- Отправляем в AI ---
+        currentSender = sender
+        sendToAI(messageBody) { response ->
+            runOnUiThread {
+                appendLog("🤖 Ответ: $response")
+                sendSms(sender, response)
+                appendLog("📤 Ответ отправлен на $sender")
+            }
+        }
+    }
+
+    // --- Обновление списка ---
+    private fun updateWhitelistUI() {
+        adapter.clear()
+        adapter.addAll(ArrayList(whitelist))
+        adapter.notifyDataSetChanged()
     }
 
     // --- Отправка в AI ---
@@ -215,8 +281,7 @@ class MainActivity : AppCompatActivity() {
         val url = "https://api.intelligence.io.solutions/api/v1/chat/completions"
 
         val messages = JSONArray()
-        messages.put(JSONObject().put("role", "system")
-            .put("content", "You are a helpful assistant. Please answer concisely, but still informative."))
+        messages.put(JSONObject().put("role", "system").put("content", "You are a helpful assistant. Please answer concisely."))
         messages.put(JSONObject().put("role", "user").put("content", userMessage))
 
         val bodyJson = JSONObject()
@@ -233,37 +298,25 @@ class MainActivity : AppCompatActivity() {
 
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                runOnUiThread { appendLog("❗\uFE0F Ошибка запроса: ${e.message}") }
+                runOnUiThread { appendLog("❗️ Ошибка запроса: ${e.message}") }
             }
 
             override fun onResponse(call: Call, response: Response) {
                 response.use {
                     if (!response.isSuccessful) {
-                        runOnUiThread { appendLog("❗\uFE0F Ошибка ответа: ${response.code}") }
+                        runOnUiThread { appendLog("❗️ Ошибка ответа: ${response.code}") }
                     } else {
                         val responseBody = response.body?.string()
                         val json = JSONObject(responseBody ?: "{}")
                         val choices = json.optJSONArray("choices")
                         val msg = choices?.optJSONObject(0)?.optJSONObject("message")
-                        var content = msg?.optString("content") ?: "Нет ответа"
-
-                        if (currentModel.startsWith("DeepSeek", ignoreCase = true)) {
-                            // Убираем все блоки <think>...</think>
-                            content = content.replace(
-                                Regex("<think>[\\s\\S]*?</think>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
-                                ""
-                            )
-                        }
-
-                        content = content.trim()
-
-                        callback(content)
+                        val content = msg?.optString("content") ?: "Нет ответа"
+                        callback(content.trim())
                     }
                 }
             }
         })
     }
-
 
     // --- Отправка SMS ---
     private fun sendSms(phone: String, message: String) {
@@ -272,18 +325,17 @@ class MainActivity : AppCompatActivity() {
         smsManager.sendMultipartTextMessage(phone, null, parts, null, null)
     }
 
-    // --- Диалог выбора модели ---
+    // --- Диалоги ---
     private fun showModelSelectionDialog() {
         val builder = AlertDialog.Builder(this)
         builder.setTitle("Выберите модель")
         builder.setItems(availableModels.toTypedArray()) { _, which ->
             currentModel = availableModels[which]
-            appendLog("ℹ\uFE0F Модель изменена на: $currentModel")
+            appendLog("ℹ️ Модель изменена на: $currentModel")
         }
         builder.show()
     }
 
-    // --- Диалог для ввода max_tokens ---
     private fun showTokenInputDialog() {
         val input = EditText(this)
         input.hint = "Введите max_tokens (число)"
@@ -295,10 +347,8 @@ class MainActivity : AppCompatActivity() {
             if (value != null && value > 0) {
                 maxTokens = value
                 btnSetTokens.text = "Задать max_tokens (сейчас $maxTokens)"
-                appendLog("ℹ\uFE0F max_tokens изменён на $maxTokens")
-            } else {
-                appendLog("❗\uFE0F Ошибка: некорректное значение max_tokens")
-            }
+                appendLog("ℹ️ max_tokens изменён на $maxTokens")
+            } else appendLog("❗️ Ошибка: некорректное значение max_tokens")
         }
         builder.setNegativeButton("Отмена", null)
         builder.show()
@@ -308,6 +358,31 @@ class MainActivity : AppCompatActivity() {
     private fun appendLog(text: String) {
         logView.append("$text\n\n")
         scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
+    }
+
+    // --- SharedPreferences через JSON ---
+    private fun saveWhitelist(set: Set<String>) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val jsonArray = JSONArray()
+        for (num in set) jsonArray.put(num)
+        prefs.edit().putString(KEY_WHITELIST, jsonArray.toString()).apply()
+    }
+
+    private fun loadWhitelist(): MutableSet<String> {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        return try {
+            val value = prefs.getString(KEY_WHITELIST, null) ?: return mutableSetOf()
+            val jsonArray = JSONArray(value)
+            val result = mutableSetOf<String>()
+            for (i in 0 until jsonArray.length()) {
+                result.add(jsonArray.optString(i))
+            }
+            result
+        } catch (e: Exception) {
+            appendLog("⚠️ Ошибка чтения белого списка: ${e.message}")
+            mutableSetOf()
+        }
     }
 
     override fun onDestroy() {
